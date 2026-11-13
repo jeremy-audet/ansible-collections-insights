@@ -154,7 +154,7 @@ keyed_groups:
 
 import time
 from ansible.plugins.inventory import BaseInventoryPlugin, Constructable
-from ansible.errors import AnsibleError
+from ansible.errors import AnsibleAssertionError, AnsibleError
 
 try:
     import requests
@@ -370,9 +370,16 @@ class InventoryModule(BaseInventoryPlugin, Constructable):
     def parse(self, inventory, loader, path, cache=True):
         if REQUESTS_IMPORT_ERROR:
             raise AnsibleError('`requests` must be installed to use this plugin') from REQUESTS_IMPORT_ERROR
-        super(InventoryModule, self).parse(inventory, loader, path)
-        self._read_config_data(path)
 
+        # self.inventory is annotated as Optional. super().parse() assigns a non-null value, but
+        # type checkers don't know that. Also see:
+        # https://docs.ansible.com/projects/ansible/latest/dev_guide/testing/sanity/no-assert.html
+        super(InventoryModule, self).parse(inventory, loader, path)
+        if self.inventory is None:
+            raise AnsibleAssertionError(
+                "parse() has unexpectedly encountered a null inventory. Please contact the ansible-collections-insights developers.")
+
+        self._read_config_data(path)
         self.server = self.get_option('server')
         url = "%s/api/inventory/v1/hosts?per_page=100" % (self.server)
         strict = self.get_option('strict')
