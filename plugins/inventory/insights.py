@@ -153,6 +153,9 @@ keyed_groups:
 '''
 
 import time
+from collections.abc import Sequence
+from typing import Any
+from urllib.parse import urlsplit, urlunsplit, urlencode, urljoin
 from ansible.plugins.inventory import BaseInventoryPlugin, Constructable
 from ansible.errors import AnsibleAssertionError, AnsibleError
 
@@ -294,41 +297,39 @@ class InventoryModule(BaseInventoryPlugin, Constructable):
                                (response.status_code, url, response.text))
         return response.json()
 
-    def get_patches(self, stale, get_system_advisories, get_system_packages, filter_tags):
-        def get_system_patching_info(system_id, info):
-            query = "api/patch/v3/export/systems"
-            url = "%s/%s/%s/%s" % (self.server, query, system_id, info)
-            return self.do_get(url)
-
-        def format_url(server, api_call, filter_tags):
-            url = "%s/%s" % (server, api_call)
-            if len(filter_tags) > 0:
-                url = "%s&tags=%s" % (url, '&tags='.join(filter_tags))
-            return url
-
-        def add_patching_data(results, patching_info):
-            for result in results:
-                id = result['id']
-                patching_info_result = get_system_patching_info(id, patching_info)
-                result['attributes'][patching_info] = patching_info_result
-            return results
-
-        query = "api/patch/v3/systems?limit=100&filter[stale]=%s" % stale
-        url = format_url(self.server, query, filter_tags)
-        results = []
-        while url:
-            response_json = self.do_get(url)
-            results += response_json['data']
-            next_page = response_json['links']['next']
-            if next_page:
-                url = format_url(self.server, next_page, filter_tags)
-            else:
-                url = None
+    def get_patches(
+            self,
+            stale: bool,
+            get_system_advisories: bool,
+            get_system_packages: bool,
+            filter_tags: Sequence[str]) -> list[dict[str, Any]]:
+        params = [("tags", filter_tag) for filter_tag in filter_tags]
+        params.append(("limit", "100"))
+        params.append(("filter[stale]", str(stale)))
+        results = self.get_patch_systems(params)
         if get_system_advisories:
-            results = add_patching_data(results, "advisories")
+            self.update_patch_systems(results, "advisories")
         if get_system_packages:
-            results = add_patching_data(results, "packages")
+            self.update_patch_systems(results, "packages")
         return results
+
+    def get_patch_systems(self, params: Sequence[tuple[str, str]]) -> list[dict[str, Any]]:
+        split = urlsplit(self.server)
+        url = urlunsplit((split.scheme, split.netloc, "/api/patch/v3/systems", urlencode(params), None))
+        resp_json = self.do_get(url)
+        results = resp_json["data"]
+        while next_page := resp_json["links"]["next"]:
+            # NOTE: This is *VERY* trusting.
+            # urljoin("http://example.com", "http://example.org") evaluates to "http://example.org"
+            resp_json = self.do_get(urljoin(url, next_page))
+            results += resp_json["data"]
+        return results
+
+    def update_patch_systems(self, results: list[dict[str, Any]], patch_type: str) -> None:
+        for result in results:
+            url = urljoin(self.server, f"/api/patch/v3/export/systems/{result['id']}/{patch_type}")
+            resp_json = self.do_get(url)
+            result['attributes'][patch_type] = resp_json
 
     def get_tags(self, ids):
         first_url = "api/inventory/v1/hosts/%s/tags?per_page=100" % ','.join(ids)
